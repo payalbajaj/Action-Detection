@@ -15,9 +15,7 @@ num_frames = 50
 num_layers = 3
 hidden_state_size = 1024
 num_glimpses = 6
-
-
-def reinforce_categorical()
+batch_size = 
 
 def build_graph(batch_size, num_classes=len(vocab)):    #num_classes should be equal to len(vocab)
 
@@ -50,18 +48,29 @@ def build_graph(batch_size, num_classes=len(vocab)):    #num_classes should be e
         
         #Confidence - p_n
         output_pred_dist = layers.fully_connected(inputs=top_h, num_outputs=2, activation_fn=None, weights_initializer = layers.xavier_initializer(), biases_initializer = tf.constant_initializer(0.1))
-        output_pred_dist = tf.nn.softMax(output_pred_dist)
-        output_pred = nn.ReinforceCategorical()(output_pred_dist)
+        #output_pred_dist = tf.nn.softmax(output_pred_dist) #avoiding this because tf.multinomial needs unnormalized log probs
+        if(is_training == True):
+            output_indices = tf.multinomial(output_pred_dist, 1)
+        else:
+            output_indices = tf.reduce_max(output_pred_dist)
+        output_pred = tf.one_hot(indices=output_indices, depth=2)
 
         #d_n - (s_n, e_n, c_n)
         pred = layers.fully_connected(inputs=top_h, num_outputs=2, activation_fn=None, weights_initializer = layers.xavier_initializer(), biases_initializer = tf.constant_initializer(0.1))
-        conf = nn.Sigmoid()(nn.Linear(rnn_size, 1)(top_h))
-        baseline = nn.Linear(rnn_size, 1)(top_h)
+        conf = layers.fully_connected(inputs=top_h, num_outputs=1, activation_fn=tf.nn.sigmoid, weights_initializer = layers.xavier_initializer(), biases_initializer = tf.constant_initializer(0.1))
+        baseline = layers.fully_connected(inputs=top_h, num_outputs=1, activation_fn=None, weights_initializer = layers.xavier_initializer(), biases_initializer = tf.constant_initializer(0.1))
         
         #Store the results
-        lstm_results += [(next_loc, )]
+        lstm_results += [(next_loc, output_pred, pred, conf, baseline)]
         
         # Update the next frame to look at
-        lstm_input = 
+        lstm_input = tf.nn.embedding_lookup(img_embeddings, img_placeholder)
 
     final_state = state
+
+    reward = protos.reward_criterion:forward(predictions, y)
+    loss = protos.pred_loss_criterion:forward({predictions,used_frames,opt.seq_len}, y)
+    baseline_loss = tf.squared_difference(predictions[opt.num_glimpses][4], reward)
+
+    avg_reward = torch.sum(reward)/batch_size
+    avg_loss = torch.sum(loss)/batch_size
