@@ -3,7 +3,7 @@ import numpy as np
 ####FILE PATH OF CNN FILE WITH 1024-DIM VECTOR HERE######
 DEFAULT_FILE_PATH = "data/cnn.txt"
 
-def loadImgVectors(tokens, filepath=DEFAULT_FILE_PATH, dimensions=1024):
+def loadImgVectors(tokens, filepath=DEFAULT_FILE_PATH, dimensions=4096):
     """Read pretrained CNN vectors"""
     imgVectors = np.zeros((len(tokens), dimensions))
     with open(filepath) as ifs:

@@ -19,6 +19,7 @@ batch_size =
 scale = 1
 fn_reward = -10
 fp_reward = -0.1
+loc_weight = 1
 
 def build_graph(batch_size, num_classes=len(vocab)):    #num_classes should be equal to len(vocab)
 
@@ -54,7 +55,7 @@ def build_graph(batch_size, num_classes=len(vocab)):    #num_classes should be e
         top_h = tf.nn.dropout(state, keep_prob)
         
         #Next Location - l_n+1
-        next_loc_mean = layers.fully_connected(inputs=top_h, num_outputs=1, activation_fn=None, weights_initializer = layers.xavier_initializer(), biases_initializer = tf.constant_initializer(0.1))
+        next_loc_mean = tf.layers.fully_connected(inputs=top_h, num_outputs=1, activation_fn=None, weights_initializer = layers.xavier_initializer(), biases_initializer = tf.constant_initializer(0.1))
         #Reinforce Normal : Adding Gaussian Noise - next_loc = nn.ReinforceNormal(loc_std)(next_loc_mean)
         if(is_training == True):
             next_loc_mean = tf.random_normal(shape=next_loc_mean.shape, mean=0.0, stddev=loc_std)
@@ -63,7 +64,7 @@ def build_graph(batch_size, num_classes=len(vocab)):    #num_classes should be e
             next_loc = next_loc_mean
         
         #Confidence - p_n
-        output_pred_dist = layers.fully_connected(inputs=top_h, num_outputs=2, activation_fn=None, weights_initializer = layers.xavier_initializer(), biases_initializer = tf.constant_initializer(0.1))
+        output_pred_dist = tf.layers.fully_connected(inputs=top_h, num_outputs=2, activation_fn=None, weights_initializer = layers.xavier_initializer(), biases_initializer = tf.constant_initializer(0.1))
         #Reinforce Categorical - output_pred_dist = tf.nn.softmax(output_pred_dist) #avoiding this because tf.multinomial needs unnormalized log probs
         if(is_training == True):
             output_indices = tf.multinomial(output_pred_dist, 1)
@@ -72,9 +73,9 @@ def build_graph(batch_size, num_classes=len(vocab)):    #num_classes should be e
         output_pred = tf.one_hot(indices=output_indices, depth=2)
 
         #d_n - (s_n, e_n, c_n)
-        pred = layers.fully_connected(inputs=top_h, num_outputs=2, activation_fn=None, weights_initializer = layers.xavier_initializer(), biases_initializer = tf.constant_initializer(0.1))
-        conf = layers.fully_connected(inputs=top_h, num_outputs=1, activation_fn=tf.nn.sigmoid, weights_initializer = layers.xavier_initializer(), biases_initializer = tf.constant_initializer(0.1))
-        baseline = layers.fully_connected(inputs=top_h, num_outputs=1, activation_fn=None, weights_initializer = layers.xavier_initializer(), biases_initializer = tf.constant_initializer(0.1))
+        pred = tf.layers.fully_connected(inputs=top_h, num_outputs=2, activation_fn=None, weights_initializer = layers.xavier_initializer(), biases_initializer = tf.constant_initializer(0.1))
+        conf = tf.layers.fully_connected(inputs=top_h, num_outputs=1, activation_fn=tf.nn.sigmoid, weights_initializer = layers.xavier_initializer(), biases_initializer = tf.constant_initializer(0.1))
+        baseline = tf.layers.fully_connected(inputs=top_h, num_outputs=1, activation_fn=None, weights_initializer = layers.xavier_initializer(), biases_initializer = tf.constant_initializer(0.1))
         
         #Store the results
         lstm_results += [(next_loc, output_pred, pred, conf, baseline)]
@@ -154,7 +155,128 @@ def build_graph(batch_size, num_classes=len(vocab)):    #num_classes should be e
     rewards = rewards * scale
 
     #Implementing this statement - loss = protos.pred_loss_criterion:forward({predictions,used_frames,opt.seq_len}, y)
-    baseline_loss = tf.squared_difference(predictions[opt.num_glimpses][4], reward)
+    gt_locs = tf.zeros((batch_size, num_glimpses, 2))
+    loc_diffs = tf.zeros((batch_size, num_glimpses, 2))
+    clf_losses = tf.zeros((batch_size, num_glimpses, 1))
+    loc_losses = tf.zeros((batch_size, num_glimpses, 2))
 
-    avg_reward = torch.sum(reward)/batch_size
-    avg_loss = torch.sum(loss)/batch_size
+    for b in range(batch_size):
+        gts = tf.gather_nd(label_placeholder, b) #label_placeholder[b]
+        gt_mapping = tf.zeros(seq_len)
+        num_gts = gts.shape[0]
+        for i in range(num_gts):
+            cur_gt_start = tf.gather_nd(gts, [[i,1]]) #gts[i][1]
+            mapping_start = 0
+            if i>1:
+                prev_gt_end = tf.gather_nd(gts, [[i-1][2]]) #gts[i-1][2]
+                mapping_start = math.floor((prev_gt_end + cur_gt_start)/2)
+            cur_gt_end = gts[i][2]
+            mapping_end = seq_len
+            if i < num_gts:
+                next_gt_start = gts[i+1][1]
+                mapping_end = math.floor((next_gt_start + cur_gt_end)/2)
+            for s=mapping_start+1,mapping_end do
+                gt_mapping[s] = i
+
+        #can use tf.slice here - not sure
+        pred = tf.gather_nd(predictions, [:,1,b])
+        conf = tf.gather_nd(predictions, [:,2,b])
+        # pred = tf.zeros((num_glimpses, 2))
+        # conf = tf.zeros((num_glimpses, 1))
+        # for s in range(num_glimpses):
+        #     pred[s]:copy(predictions[s][2][b])
+        #     conf[s]:copy(predictions[s][3][b])
+
+        if num_gts > 0:
+            clf_losses[b] = tf.log(conf+1e-12)
+        else:
+            clf_losses[b] = tf.log((conf*-1)+1+1e-12)
+
+        if num_gts > 0:
+            for s in range(num_glimpses):
+                gt_idx = gt_mapping[used_frames[s][b][1]]
+                gt_locs[b][s][1] = gts[gt_idx][1] / seq_len
+                gt_locs[b][s][2] = gts[gt_idx][2] / seq_len
+            loc_diffs[b] = pred - gt_locs[b]
+            loc_losses[b] = torch.pow(loc_diffs[b],2):mul(loc_weight)
+    clf_losses *= -1 # neg log likelihood
+    loss = clf_losses + tf.reduce_sum(loc_losses,3)
+
+    baseline_diff = predictions[num_glimpses][4] - reward
+    baseline_loss = tf.square(predictions[num_glimpses][4], reward)
+    avg_reward = tf.reduce_sum(reward)/batch_size
+    avg_loss = tf.reduce_sum(loss)/batch_size
+
+    ## Backward Pass
+    drnn_state = {[num_glimpses] = {}}
+    for i=init_hidden_offset+1,#init_state do
+        table.insert(drnn_state[opt.num_glimpses], init_state[i]:clone():zero())
+    end
+    
+    ## Implementing this line here - daction = protos.reward_criterion:backward(predictions,y)
+    seq_len = len(predictions)
+    baseline = predictions[seq_len][4]:double()
+    rewardsRel = rewards
+    rewardsGrad = rewardsRel:mul(-1)
+
+    gradInput = {}
+    for s=1,seq_len do
+        gradInput[s] = {}
+        gradInput[s][1] = torch.repeatTensor(rewardsGrad, 1,1) #dLoc
+        gradInput[s][2] = torch.repeatTensor(rewardsGrad, 1,2) #dAction
+    daction = gradInput
+    
+    ## Implementing this line here - local doutput = protos.pred_loss_criterion:backward(predictions,y)
+    seq_len = #input
+
+    gradInput = {}
+    for s in range(seq_len):
+        gradInput[s] = {}
+        gradInput[s][1] = torch.Tensor(batch_size,2):zero()
+        gradInput[s][2] = torch.Tensor(batch_size,1):zero()
+
+        conf = predictions[s][3]
+        for b in range(batch_size):
+            gts = target[b]
+            num_gts = gts.shape[0]
+            if num_gts > 0:
+                gradInput[s][1][b] = loc_diffs[b][s]:mul(2):mul(loc_weight)
+                gradInput[s][2][b] = -1 / (conf[b][1] + 1e-12)
+            else
+                gradInput[s][1][b] = 0
+                gradInput[s][2][b] = 1 / (1 - conf[b][1] + 1e-12)
+
+    doutput = gradInput
+
+    ##Implementing this line here - local dbaseline = protos.baseline_loss_criterion:backward(predictions[opt.num_glimpses][4], reward)
+    dbaseline = 2*baseline_diff
+
+    for t in reversed(range(num_glimpses)):
+        doutput_t = tf.gather_nd(doutput, t) #doutput[t]
+        daction_t = tf.gather_nd(daction, t) #daction[t]
+        if t == num_glimpses:
+            dbaseline_t = dbaseline
+        else
+            dbaseline_t = tf.zeros((batch_size, 1))
+
+        #GPU for Lua
+        # if opt.gpuid >= 0:
+        #     daction_t[1] = daction_t[1]:cuda() #next_loc
+        #     daction_t[2] = daction_t[2]:cuda() #use_pred
+        #     doutput_t[1] = doutput_t[1]:cuda() #pred
+        #     doutput_t[2] = doutput_t[2]:cuda() #conf
+        #     dbaseline_t = dbaseline_t:cuda() #baseline
+        table.insert(drnn_state[t], daction_t[1]) #next_loc
+        table.insert(drnn_state[t], daction_t[2]) #use_pred
+        table.insert(drnn_state[t], doutput_t[1]) #pred
+        table.insert(drnn_state[t], doutput_t[2]) #conf
+        table.insert(drnn_state[t], dbaseline_t) -- lstm baseline
+        local dlst = clones.rnn[t]:backward({input_data[{{}, t}], unpack(rnn_state[t-1])}, drnn_state[t])
+        drnn_state[t-1] = {}
+        for k,v in pairs(dlst) do
+            if k > (1+init_hidden_offset) then -- k == 1 is gradient on x, which we dont need, k=2 is loc
+                drnn_state[t-1][k-2] = v
+    
+    # clip gradient element-wise
+    grad_params:clamp(-opt.grad_clip, opt.grad_clip)
+    return {avg_reward, avg_loss}, grad_params
