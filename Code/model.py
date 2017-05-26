@@ -28,7 +28,7 @@ def build_graph(batch_size, num_classes=len(vocab)):    #num_classes should be e
     # Placeholders
     img_placeholder = tf.placeholder(tf.int32, [batch_size,]) #the first frame to look at for all videos in the batch
     video_indices = tf.placeholder(tf.int32, [batch_size,]) #the offset needed for embed indices
-    label_placeholder = tf.placeholder(, [batch_size,])
+    label_placeholder = tf.placeholder(tf.int32, [batch_size,])
     dropout = tf.constant(0.7)
 
     #Embeddings
@@ -79,7 +79,7 @@ def build_graph(batch_size, num_classes=len(vocab)):    #num_classes should be e
         
         #Store the results
         lstm_results += [(next_loc, output_pred, pred, conf, baseline)]
-        predictions[t] = [output_pred, pred, conf, baseline]
+        predictions[i] = [output_pred, pred, conf, baseline]
 
         #Increment next_loc indices by video indices to get the right embedding indices?
         next_embed_indices = (video_indices-1)*50+tf.round(next_loc)
@@ -91,26 +91,44 @@ def build_graph(batch_size, num_classes=len(vocab)):    #num_classes should be e
     final_state = state
 
     #Implementing this statement - reward = protos.reward_criterion:forward(predictions, label_placeholder)
-    det_scores = tf.zeros((batch_size, num_glimpses))
-    gt_scores = tf.zeros(batch_size,)
-    for b in range(batch_size):
-        gts = label_placeholder[b]
-        use_pred = tf.zeros((num_glimpses, 2))
-        pred = tf.zeros((num_glimpses, 2))
-        conf = tf.zeros((num_glimpses, 1))
+    
+    gts = label_placeholder
+    use_pred = tf.zeros((batch_size, num_glimpses, 2))
+    pred_r = tf.zeros((batch_size, num_glimpses, 2))
+    conf_r = tf.zeros((batch_size, num_glimpses, 1))    
+    use_pred = predictions[:,0,:]
+    pred_r = predictions[:,1,:]
+    conf_r = predictions[:,2,:]
+
+    use_pred_true = tf.greater(use_pred[:,:,1], 0.5)
+    if(tf.reduce_sum(use_pred_true) == 0):
+        gt_scores = fn_reward
+
+    nonzero_use_pred_true = tf.where(use_pred_true)    
+    pred_r2 = tf.gather_nd(pred_r, nonzero_use_pred_true)
+    conf_r2 = tf.gather_nd(conf_r, nonzero_use_pred_true)
+    
+    # det_scores = tf.zeros((batch_size, num_glimpses))
+    # gt_scores = tf.zeros(batch_size,)
+
+    # for b in range(batch_size):
+        # gts = label_placeholder[b]
+        # use_pred = tf.zeros((num_glimpses, 2))
+        # pred = tf.zeros((num_glimpses, 2))
+        # conf = tf.zeros((num_glimpses, 1))
 
         #I don't think we can do this kind of assignment in tensorflow - can we directly copy the values form predictions?
-        for s in range(num_glimpses):
-            use_pred[s]=tf.identity(predictions[s][0][b])
-            pred[s]=tf.identity(predictions[s][1][b])
-            conf[s]=tf.identity(predictions[s][2][b])
+        # for s in range(num_glimpses):
+        #     use_pred[s]=tf.identity(predictions[s][0][b])
+        #     pred[s]=tf.identity(predictions[s][1][b])
+        #     conf[s]=tf.identity(predictions[s][2][b])
 
-        use_pred_true = tf.greater(tf.gather(use_pred,1),0.5)
-        nonzero_use_pred_true = tf.where(use_pred_true)
-        if tf.equal(tf.reduce_sum(use_pred_true)) == 0:
-            if gts.shape[0] > 0:
-                gt_scores[b] = fn_reward
-            continue
+        # use_pred_true = tf.greater(tf.gather(use_pred,1),0.5)
+        # nonzero_use_pred_true = tf.where(use_pred_true)
+        # if tf.equal(tf.reduce_sum(use_pred_true)) == 0:
+        #     if gts.shape[0] > 0:
+        #         gt_scores[b] = fn_reward
+        #     continue
 
         use_pred_idxs = nonzero_use_pred_true[:,0]
         pred = pred:index(1,use_pred_idxs)
@@ -215,9 +233,9 @@ def build_graph(batch_size, num_classes=len(vocab)):    #num_classes should be e
     
     ## Implementing this line here - daction = protos.reward_criterion:backward(predictions,y)
     seq_len = len(predictions)
-    baseline = predictions[seq_len][4]:double()
+    baseline = double(predictions[seq_len][4])
     rewardsRel = rewards
-    rewardsGrad = rewardsRel:mul(-1)
+    rewardsGrad = -1*rewardsRel
 
     gradInput = {}
     for s=1,seq_len do
@@ -227,24 +245,31 @@ def build_graph(batch_size, num_classes=len(vocab)):    #num_classes should be e
     daction = gradInput
     
     ## Implementing this line here - local doutput = protos.pred_loss_criterion:backward(predictions,y)
-    seq_len = #input
+    seq_len = len(predictions)
 
-    gradInput = {}
+    gradInput = []
     for s in range(seq_len):
-        gradInput[s] = {}
-        gradInput[s][1] = torch.Tensor(batch_size,2):zero()
-        gradInput[s][2] = torch.Tensor(batch_size,1):zero()
-
-        conf = predictions[s][3]
+        gradInput.append([])
+        gradInput[s].append(2*loc_weight*(tf.gather_nd(loc_diffs, [:,s])))
+        gradInput[s].append([])
         for b in range(batch_size):
-            gts = target[b]
-            num_gts = gts.shape[0]
-            if num_gts > 0:
-                gradInput[s][1][b] = loc_diffs[b][s]:mul(2):mul(loc_weight)
-                gradInput[s][2][b] = -1 / (conf[b][1] + 1e-12)
-            else
-                gradInput[s][1][b] = 0
-                gradInput[s][2][b] = 1 / (1 - conf[b][1] + 1e-12)
+            gradInput[s][b]  = -1.0 / (predictions[s][2][b][0] + 1e-12)
+    gradInput = tf.pack(gradInput)  #convert list to tensor
+
+    #Tried to simplify the code below
+        # gradInput[s].append(tf.zeros((batch_size,2)))
+        # gradInput[s].append(tf.zeros((batch_size,1)))
+
+        # conf = predictions[s][3]
+        # for b in range(batch_size):
+        #     gts = tf.gather_nd(label_placeholder, b)
+        #     num_gts = gts.shape[0]  #thumos has 1 label - so this can probably be initialized to 1
+        #     if num_gts > 0:
+        #         gradInput[s][1][b] = loc_diffs[b][s]:mul(2):mul(loc_weight)
+        #         gradInput[s][2][b] = -1 / (conf[b][1] + 1e-12)
+        #     else:
+        #         gradInput[s][1][b] = 0
+        #         gradInput[s][2][b] = 1 / (1 - conf[b][1] + 1e-12)
 
     doutput = gradInput
 
